@@ -1,0 +1,4 @@
+streamlit
+pandas
+numpy
+# Adicione quaisquer outras bibliotecas que você use no seu código, se houver.
