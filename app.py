@@ -19,7 +19,6 @@ def formatar_pt_br(valor, casas_decimais=2):
     #    Troca a vírgula (que pode ser usada como milhar) por 'X' temporariamente.
     #    Troca o ponto (que pode ser o decimal) por vírgula.
     #    Troca o 'X' por ponto.
-    #    Exemplo: 10,000.50 (EUA) -> 10.000,50 (BR)
     return numero_str.replace('.', 'X').replace(',', '.').replace('X', ',')
 
 # --- CONFIGURAÇÃO DE PATH E DADOS GLOBAIS ---
@@ -37,7 +36,7 @@ FATOR_K_ICC = {
         'EPR/HEPR (90°C)': 143, # θi=90°C -> θf=220°C
     },
     'Alumínio': {
-        'PVC (70°C)': 74,     # θi=70°C -> θf=140°C
+        'PVC (70°C)': 74,      # θi=70°C -> θf=140°C
         'XLPE (90°C)': 145,    # θi=90°C -> θf=200°C
         'EPR/HEPR (90°C)': 112,  # θi=90°C -> θf=180°C
     }
@@ -56,9 +55,9 @@ def carregar_e_preparar_dados(caminho_csv):
         final_table = {}
         for bitola, data in tabela_cabos.items():
             final_table[bitola] = [
-                data['R_ohm_km'],       # 0: Resistência (R)
-                data['X_ohm_km'],       # 1: Reatância (X)
-                data['I_admissivel'],   # 2: Corrente Admissível (I)
+                data['R_ohm_km'],         # 0: Resistência (R)
+                data['X_ohm_km'],         # 1: Reatância (X)
+                data['I_admissivel'],     # 2: Corrente Admissível (I)
                 data['Custo_por_metro'] # 3: Custo por metro (C)
             ]
         return final_table
@@ -105,7 +104,8 @@ OPCOES_BITOLA_NOMINAL = sorted(TABELA_AREAS_CABOS.keys())
 def calcular_queda_tensao_percentual(Ib, L_metros, CosPhi, V_LL, R_ohm_km, X_ohm_km, sistema):
     """Calcula a queda de tensão (DeltaV) percentual."""
     L_km = L_metros / 1000.0
-    SinPhi = math.sqrt(1.0 - (CosPhi ** 2)) 
+    # Evita erro de domínio se CosPhi for ligeiramente > 1
+    SinPhi = math.sqrt(max(0, 1.0 - (CosPhi ** 2))) 
     
     if sistema == 'Trifásico':
         K = math.sqrt(3) 
@@ -239,6 +239,29 @@ def calcular_corrente_cc_admissivel(Area_nominal_mm2, tempo_cc_seg, k_fator):
     Icc_adm = (Area_nominal_mm2 * k_fator) / math.sqrt(tempo_cc_seg)
     return Icc_adm
 
+def calcular_icc_max(V_LL, sistema, R_cabo, X_cabo, R_fonte_ohm, X_fonte_ohm):
+    """Calcula a corrente de curto-circuito (Icc) máxima (simétrica inicial) no ponto."""
+    
+    R_total = R_cabo + R_fonte_ohm
+    X_total = X_cabo + X_fonte_ohm
+    # Z_total é o módulo da impedância total por fase (Z = R + jX)
+    Z_total = math.sqrt(R_total**2 + X_total**2) 
+    
+    if Z_total == 0:
+        # Se a impedância total for zero, a Icc é teoricamente infinita.
+        return float('inf'), Z_total
+    
+    if sistema == 'Trifásico':
+        # Corrente de curto-circuito trifásico (simétrico)
+        # Icc3p = V_LL / (sqrt(3) * Z_total)
+        Icc_max = V_LL / (math.sqrt(3) * Z_total)
+        
+    else: # Monofásico (Assumindo curto-circuito Fase-Fase simétrico)
+        # Icc2p = V_LL / (2 * Z_total)
+        Icc_max = V_LL / (2 * Z_total) 
+        
+    return Icc_max, Z_total
+
 
 # --- INTERFACE DO USUÁRIO (STREAMLIT) ---
 
@@ -251,6 +274,9 @@ st.caption("Cálculos baseados em critérios da NBR 5410. Verifique seus CSVs.")
 # Usar st.session_state para armazenar o resultado da otimização de forma persistente
 if 'resultado_otimizacao' not in st.session_state:
     st.session_state.resultado_otimizacao = {'bitola': None, 'atende_corrente': False}
+if 'icc_max_calculada' not in st.session_state:
+    st.session_state.icc_max_calculada = 10000.0 # Valor padrão para Icc
+
 
 # --- Secção 1: Otimização de Cabos ---
 st.header("1. Dimensionamento do Circuito Individual")
@@ -260,11 +286,12 @@ col_sistema, col_norma = st.columns(2)
 with col_sistema:
     st.subheader("Dados do Circuito (Cálculo do Cabo)")
     
-    sistema_selecionado = st.selectbox("Sistema", options=['Trifásico', 'Monofásico'])
+    # Armazena estas variáveis na sessão para serem usadas nas outras seções
+    sistema_selecionado = st.selectbox("Sistema", options=['Trifásico', 'Monofásico'], key='sist_sel')
     
-    corrente_ib = st.number_input("Corrente de Projeto (Ib) [A]", min_value=1.0, value=95.0, step=1.0)
-    comprimento_l = st.number_input("Comprimento do Circuito [m]", min_value=1.0, value=150.0, step=1.0)
-    fator_potencia = st.slider("Fator de Potência (cos φ)", min_value=0.5, max_value=1.0, value=0.85, step=0.01)
+    corrente_ib = st.number_input("Corrente de Projeto (Ib) [A]", min_value=1.0, value=95.0, step=1.0, key='ib_val')
+    comprimento_l = st.number_input("Comprimento do Circuito [m]", min_value=1.0, value=150.0, step=1.0, key='l_val')
+    fator_potencia = st.slider("Fator de Potência (cos φ)", min_value=0.5, max_value=1.0, value=0.85, step=0.01, key='fp_val')
 
 with col_norma:
     st.subheader("Restrições e Fatores de Correção")
@@ -272,17 +299,17 @@ with col_norma:
     if sistema_selecionado == 'Trifásico':
         tensoes = [220.0, 380.0, 440.0]
         indice_tensao = tensoes.index(380.0) if 380.0 in tensoes else 0
-        tensao_ll = st.selectbox("Tensão de Linha (V_LL) [V]", options=tensoes, index=indice_tensao)
+        tensao_ll = st.selectbox("Tensão de Linha (V_LL) [V]", options=tensoes, index=indice_tensao, key='vll_val')
     else: 
         tensoes = [127.0, 220.0]
         indice_tensao = tensoes.index(220.0) if 220.0 in tensoes else 0
-        tensao_ll = st.selectbox("Tensão (F-N ou F-F) [V]", options=tensoes, index=indice_tensao)
+        tensao_ll = st.selectbox("Tensão (F-N ou F-F) [V]", options=tensoes, index=indice_tensao, key='vll_val')
 
     dv_max = st.number_input("Queda de Tensão Máxima Permitida [%]", 
-                             min_value=1.0, max_value=5.0, value=4.0, step=0.1)
+                             min_value=1.0, max_value=5.0, value=4.0, step=0.1, key='dv_max')
     
     fator_agrupamento = st.number_input("Fator de Agrupamento (Ca)", 
-                                        min_value=0.2, max_value=1.0, value=1.0, step=0.05)
+                                        min_value=0.2, max_value=1.0, value=1.0, step=0.05, key='ca_val')
 
 
 if st.button("🚀 Otimizar Bitola de Cabo"):
@@ -314,22 +341,115 @@ if st.button("🚀 Otimizar Bitola de Cabo"):
         else:
             st.warning(f"⚠️ **Falha no Critério de Queda de Tensão:** Nenhuma bitola atende à restrição de queda de tensão ({dv_max}%).")
 
-# --- NOVO BLOCO (Antiga Secção 3: Verificação de Curto-Circuito -> Nova Secção 2) ---
+#       ---
 
-st.divider()
-st.header("2. Verificação de Curto-Circuito (Critério Térmico)")
-st.caption("Verifica a capacidade do cabo de suportar a Icc máxima esperada pelo tempo de atuação da proteção. (Icc_adm = A * k / sqrt(t))")
+## 2. Cálculo de Impedância e Icc Máxima do Alimentador
+
+st.header("2. Cálculo de Impedância e Icc Máxima do Alimentador")
+st.caption(f"Calcula a impedância total por fase (Fonte + Cabo) e a Corrente Máxima de Curto-Circuito (Icc) no ponto de instalação. **Comprimento ({comprimento_l} m) e Tensão ({tensao_ll} V) da Seção 1 serão utilizados.**")
+
+# 1. Obter Bitola
+bitola_otimizada_str = st.session_state.resultado_otimizacao['bitola'].replace(" mm²", "") if st.session_state.resultado_otimizacao['bitola'] else OPCOES_BITOLA_NOMINAL[0]
+bitola_icc_impedancia = float(st.selectbox(
+    "Bitola do Cabo (mm²) para Icc",
+    options=OPCOES_BITOLA_NOMINAL,
+    index=OPCOES_BITOLA_NOMINAL.index(float(bitola_otimizada_str)) if float(bitola_otimizada_str) in OPCOES_BITOLA_NOMINAL else 0,
+    key="icc_impedancia_bitola",
+    help="Bitola do condutor a ser usado no cálculo de impedância. (Utiliza a bitola otimizada da Seção 1 como sugestão)."
+))
+
+# 2. Dados da Fonte (para Icc máxima)
+st.subheader("Dados da Fonte (Subestação/Transformador)")
+col_fonte_r, col_fonte_x = st.columns(2)
+
+with col_fonte_r:
+    R_fonte_mOhm = st.number_input(
+        "Resistência da Fonte (R_f) [mΩ]",
+        min_value=0.0, value=2.0, step=0.1, format="%.3f",
+        key="r_fonte",
+        help="Resistência por fase da fonte (transformador + barramento) em mili-Ohms."
+    )
+    R_fonte_ohm = R_fonte_mOhm / 1000.0
+
+with col_fonte_x:
+    X_fonte_mOhm = st.number_input(
+        "Reatância da Fonte (X_f) [mΩ]",
+        min_value=0.0, value=10.0, step=0.1, format="%.3f",
+        key="x_fonte",
+        help="Reatância por fase da fonte (transformador + barramento) em mili-Ohms."
+    )
+    X_fonte_ohm = X_fonte_mOhm / 1000.0
+
+if st.button("🔎 Calcular Impedância e Icc", key="btn_icc_impedancia"):
+    
+    # 3. Obter R e X do cabo
+    if bitola_icc_impedancia in TABELA_CABOS_E_CUSTO:
+        R_ohm_km, X_ohm_km, _, _ = TABELA_CABOS_E_CUSTO[bitola_icc_impedancia]
+        
+        # CÁLCULO DA IMPEDÂNCIA DO CABO (USANDO O COMPRIMENTO)
+        L_km = comprimento_l / 1000.0  
+        R_cabo = R_ohm_km * L_km
+        X_cabo = X_ohm_km * L_km
+        
+        # Cálculo da Impedância e Icc
+        icc_max_calculada, Z_total = calcular_icc_max(
+            tensao_ll, 
+            sistema_selecionado, 
+            R_cabo, X_cabo, 
+            R_fonte_ohm, X_fonte_ohm
+        )
+        
+        st.subheader("Resultados do Curto-Circuito (Limitado por Impedância)")
+        
+        col_res_z, col_res_icc = st.columns(2)
+        
+        # Resultados de Impedância
+        with col_res_z:
+            st.metric("Resistência Total (R_total)", 
+                      f"{formatar_pt_br(R_cabo + R_fonte_ohm, 5)} Ω",
+                      help=f"Cabo: {formatar_pt_br(R_cabo, 5)} Ω | Fonte: {formatar_pt_br(R_fonte_ohm, 5)} Ω")
+            st.metric("Reatância Total (X_total)", 
+                      f"{formatar_pt_br(X_cabo + X_fonte_ohm, 5)} Ω",
+                      help=f"Cabo: {formatar_pt_br(X_cabo, 5)} Ω | Fonte: {formatar_pt_br(X_fonte_ohm, 5)} Ω")
+            st.metric("Impedância Total (Z_total)", 
+                      f"Z = {formatar_pt_br(Z_total, 5)} Ω/Fase",
+                      help="Z total = √(R_total² + X_total²)")
+        
+        # Resultados de Icc
+        with col_res_icc:
+            st.metric("Corrente Máxima de Curto-Circuito (Icc_máx)", 
+                      f"{formatar_pt_br(icc_max_calculada, 0)} A",
+                      help=f"Icc = V / (K * Z_total). Sistema: {sistema_selecionado}")
+            
+            # Avisar sobre o tipo de curto-circuito
+            if sistema_selecionado == 'Trifásico':
+                st.info("Icc calculada é para um **Curto-Circuito Trifásico** (Icc3p).")
+            else:
+                st.info("Icc calculada é para um **Curto-Circuito Fase-Fase** (Icc2p simplificado).")
+
+        # Armazenar o Icc para ser usado na Secção 3 (Verificação Térmica)
+        st.session_state.icc_max_calculada = icc_max_calculada
+        
+    else:
+        st.error(f"Erro: Dados R e X não encontrados para a bitola {bitola_icc_impedancia} mm².")
+
+#---
+
+## 3. Verificação de Curto-Circuito (Critério Térmico)
+
+st.header("3. Verificação de Curto-Circuito (Critério Térmico)")
+st.caption("Verifica a capacidade do cabo de suportar a Icc máxima esperada pelo tempo de atuação da proteção. ($I_{cc\_adm} = \\frac{A \\cdot k}{\\sqrt{t}}$)")
 
 col_cc_1, col_cc_2, col_cc_3 = st.columns(3)
 
 # 1. Bitola a ser verificada (usa a otimizada por padrão)
-bitola_otimizada_str = st.session_state.resultado_otimizacao['bitola'].replace(" mm²", "") if st.session_state.resultado_otimizacao['bitola'] else OPCOES_BITOLA_NOMINAL[0]
+bitola_otimizada_str_3 = st.session_state.resultado_otimizacao['bitola'].replace(" mm²", "") if st.session_state.resultado_otimizacao['bitola'] else OPCOES_BITOLA_NOMINAL[0]
 
 with col_cc_1:
     bitola_a_verificar_str = st.selectbox(
         "Bitola do Cabo para Verificação (mm²)", 
         options=OPCOES_BITOLA_NOMINAL, 
-        index=OPCOES_BITOLA_NOMINAL.index(float(bitola_otimizada_str)) if float(bitola_otimizada_str) in OPCOES_BITOLA_NOMINAL else 0,
+        index=OPCOES_BITOLA_NOMINAL.index(float(bitola_otimizada_str_3)) if float(bitola_otimizada_str_3) in OPCOES_BITOLA_NOMINAL else 0,
         key="cc_bitola_verificar",
         help="Selecione a bitola nominal para o cálculo de Icc. Usa a bitola da Secção 1 por padrão, se calculada."
     )
@@ -360,12 +480,16 @@ with col_cc_3:
         help="Tempo máximo que o curto-circuito deve durar, definido pelo dispositivo de proteção."
     )
 
-# 5. Icc Máxima Esperada
+# 5. Icc Máxima Esperada (Usa o valor da Secção 2 como default)
+icc_max_esperada_default = st.session_state.get('icc_max_calculada', 10000.0) 
+
 icc_max_esperada = st.number_input(
     "Corrente Máxima de Curto-Circuito Esperada (Icc_max) [A]",
-    min_value=0.0, value=10000.0, step=100.0,
+    min_value=0.0, 
+    value=float(icc_max_esperada_default), 
+    step=100.0,
     key="icc_max_esperada",
-    help="Valor da Icc esperada no ponto de instalação do cabo (deve ser menor que a Icc Admissível)."
+    help="Valor da Icc esperada. O valor calculado na Seção 2 é carregado como sugestão."
 )
 
 
@@ -388,11 +512,11 @@ if st.button("🔍 Calcular e Verificar Curto-Circuito", key="btn_cc_check"):
         # Aplicação da formatação pt-BR
         with col_res_icc_1:
             st.metric("Icc Admissível do Cabo", 
-                      f"{formatar_pt_br(Icc_admissivel)} A", 
+                      f"{formatar_pt_br(Icc_admissivel, 0)} A", 
                       help=f"Calculada para A={Area_nominal_mm2} mm², k={fator_k_usado}, t={tempo_cc} s.")
             
             st.metric("Icc Máx. Esperada (Projeto)", 
-                      f"{formatar_pt_br(icc_max_esperada)} A")
+                      f"{formatar_pt_br(icc_max_esperada, 0)} A")
             
         with col_res_icc_2:
             st.metric("Fator 'k' Utilizado", f"{fator_k_usado}", 
@@ -411,15 +535,17 @@ if st.button("🔍 Calcular e Verificar Curto-Circuito", key="btn_cc_check"):
     except Exception as e:
         st.error(f"Erro no cálculo de curto-circuito: Verifique se a Bitola e o Tempo de Proteção são valores válidos. Detalhe: {e}")
 
-# --- NOVO BLOCO (Antiga Secção 2: Dimensionamento de Eletroduto -> Nova Secção 3) ---
+#---
 
-st.divider()
-st.header("3. Dimensionamento de Eletroduto (Agrupamento)")
+## 4. Dimensionamento de Eletroduto (Agrupamento)
+
+st.header("4. Dimensionamento de Eletroduto (Agrupamento)")
 st.caption("Critérios: Área Real de Seção Isolada (40% máx.) **E** no máximo 3 bitolas consecutivas.")
 
 num_circuitos = st.number_input(
     "Quantos circuitos diferentes (bitolas diferentes) serão agrupados?",
     min_value=0, max_value=3, value=1, step=1,
+    key="num_circ_val",
     help="Defina o número de diferentes bitolas que serão inseridas. Máximo de 3 para seguir o critério de agrupamento."
 )
 
@@ -429,7 +555,9 @@ if num_circuitos > 0:
     st.subheader(f"Configuração de {num_circuitos} Circuitos:")
     
     col_index, col_bitola, col_qnt = st.columns([0.5, 3, 2])
-    col_bitola.write("**Bitola (mm²)**")
+    
+    # LINHA CORRIGIDA
+    col_bitola.write("**Bitola (mm²)**") 
     col_qnt.write("**Qtd. Condutores**")
 
     for i in range(num_circuitos):
@@ -439,7 +567,7 @@ if num_circuitos > 0:
         bitola_selecionada = col_bitola.selectbox(
             f"Bitola (mm²)", 
             options=OPCOES_BITOLA_NOMINAL, 
-            key=f"bitola_{i}",
+            key=f"bitola_elet_{i}",
             help="Selecione a bitola nominal do condutor."
         )
         
@@ -448,7 +576,7 @@ if num_circuitos > 0:
             min_value=1, 
             value=3, 
             step=1, 
-            key=f"qnt_{i}",
+            key=f"qnt_elet_{i}",
             help="Número total de condutores dessa bitola (ex: 3 para trifásico + neutro, se o neutro for da mesma bitola)."
         )
 
@@ -488,4 +616,3 @@ if num_circuitos > 0:
                 st.error(f"❌ **Falha na Regra de Agrupamento:** {mensagem}")
             else:
                 st.error("Nenhum eletroduto na tabela de dados é grande o suficiente para acomodar a área total dos cabos.")
-                
