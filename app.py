@@ -267,9 +267,11 @@ def calcular_icc_max(V_LL, sistema, R_cabo, X_cabo, R_fonte_ohm, X_fonte_ohm):
 
 st.set_page_config(page_title="Dimensionamento de Cabos e Eletrodutos | SaaS Eng.", layout="wide")
 
-st.title("⚡ Dimensionamento de Cabos e Eletrodutos")
+st.title("⚡ Dimensionamento de Cabos e Eletrodutos - Em Fase de Testes de Pré-Lançamento")
 st.caption("Sampaio, Manoel Camargo - Engenheiro Eletricista - CREA-SP: 068.503.146-7 - www.sampaio-eng-eletrica.com.br - projetos@sampaio-eng-eletrica.com.br")
 st.caption("Cálculos baseados em critérios da NBR 5410. Verifique seus CSVs.")
+st.caption("Este Programa somente deve ser usado para Projetos Elétricos exclusivamente por Engenheiros Eletricistas Habilitados; e os Resultados deve ser conferidos")
+st.caption("O Autor deste Programa não se responsabiliza por quaisquer falhas, erros ou consequências nos resultados, devedo ser utilizado por conta e risco do usuário.")
 
 # Usar st.session_state para armazenar o resultado da otimização de forma persistente
 if 'resultado_otimizacao' not in st.session_state:
